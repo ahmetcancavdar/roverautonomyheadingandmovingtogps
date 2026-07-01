@@ -235,9 +235,12 @@ If it appears as `/dev/ttyUSB0`, use that port when running the bridge node.
 
 ## Run Arduino Bridge Node
 
+## Run Arduino Bridge Node
+
 Terminal 1:
 
 ```bash
+source /opt/ros/jazzy/setup.bash
 source ~/arc26_ros2_ws/install/setup.bash
 
 ros2 run arc26_rover_bringup arduino_bridge_node \
@@ -245,8 +248,7 @@ ros2 run arc26_rover_bringup arduino_bridge_node \
   -p port:=/dev/ttyACM0 \
   -p baud:=115200 \
   -p plane:=XY \
-  -p heading_offset_deg:=0.0
-```
+  -p heading_offset_deg:=-53.5
 
 This node should stay running.
 
