@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>arc26_rover_bringup</name>
+  <version>0.1.0</version>
+  <description>ARC26 rover Raspberry Pi 5 ROS2 Jazzy autonomy bridge and heading control.</description>
+
+  <maintainer email="ahmetcan5841@gmail.com">pi8gb</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>python3-serial</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

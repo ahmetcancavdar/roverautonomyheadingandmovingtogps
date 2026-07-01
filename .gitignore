@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# ROS2 workspace outputs
+build/
+install/
+log/
+
+# Colcon / test cache
+.pytest_cache/
+.coverage
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+
+# Environment files
+.env
+venv/
+.venv/
