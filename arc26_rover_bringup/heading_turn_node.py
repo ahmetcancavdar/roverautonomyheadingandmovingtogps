@@ -14,7 +14,7 @@ class HeadingTurnNode(Node):
         self.declare_parameter("target_heading", 90.0)
         self.declare_parameter("turn_pwm_fast", 90)
         self.declare_parameter("turn_pwm_slow", 65)
-        self.declare_parameter("heading_tolerance_deg", 2.75)
+        self.declare_parameter("heading_tolerance_deg", 2.75)   
         self.declare_parameter("slow_turn_threshold_deg", 25.0)
         self.declare_parameter("command_interval_sec", 0.15)
         self.declare_parameter("heading_timeout_sec", 1.0)
