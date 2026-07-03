@@ -36,19 +36,22 @@ class WaypointNavNode(Node):
         self.declare_parameter("target_lat", 0.0)
         self.declare_parameter("target_lon", 0.0)
 
-        # Navigation thresholds
-        self.declare_parameter("goal_radius_m", 0.30)
+        # Dynamic goal radius:
+        # RTK_FIXED q=4 -> fixed_goal_radius_m
+        # RTK_FLOAT/SPS/valid non-fixed GPS -> non_fixed_goal_radius_m
+        self.declare_parameter("fixed_goal_radius_m", 0.30)
+        self.declare_parameter("non_fixed_goal_radius_m", 0.60)
 
-        # Hysteresis heading control:
-        # When TURN mode: switch to FORWARD if error <= heading_tolerance_deg
-        # When FORWARD mode: switch back to TURN if error >= reacquire_heading_error_deg
+        # Heading hysteresis:
+        # TURN -> FORWARD when abs_error <= heading_tolerance_deg
+        # FORWARD -> TURN when abs_error >= reacquire_heading_error_deg
         self.declare_parameter("heading_tolerance_deg", 5.0)
         self.declare_parameter("reacquire_heading_error_deg", 10.0)
 
         # Motor parameters
         self.declare_parameter("turn_pwm_fast", 75)
         self.declare_parameter("turn_pwm_slow", 45)
-        self.declare_parameter("forward_pwm", 50)
+        self.declare_parameter("forward_pwm", 60)
 
         # If heading error is smaller than this, slow turn PWM is used
         self.declare_parameter("slow_turn_threshold_deg", 30.0)
@@ -60,17 +63,18 @@ class WaypointNavNode(Node):
         self.declare_parameter("gps_timeout_sec", 1.5)
         self.declare_parameter("heading_timeout_sec", 1.0)
 
-        # RTK safety
-        self.declare_parameter("require_rtk_fixed", True)
-        self.declare_parameter("stop_if_no_rtk", True)
-
         # Use only if left/right motor commands are reversed
         self.declare_parameter("invert_turn_direction", False)
 
         self.target_lat = float(self.get_parameter("target_lat").value)
         self.target_lon = float(self.get_parameter("target_lon").value)
 
-        self.goal_radius_m = float(self.get_parameter("goal_radius_m").value)
+        self.fixed_goal_radius_m = float(
+            self.get_parameter("fixed_goal_radius_m").value
+        )
+        self.non_fixed_goal_radius_m = float(
+            self.get_parameter("non_fixed_goal_radius_m").value
+        )
 
         self.heading_tolerance_deg = float(
             self.get_parameter("heading_tolerance_deg").value
@@ -93,9 +97,6 @@ class WaypointNavNode(Node):
         self.gps_timeout_sec = float(self.get_parameter("gps_timeout_sec").value)
         self.heading_timeout_sec = float(self.get_parameter("heading_timeout_sec").value)
 
-        self.require_rtk_fixed = bool(self.get_parameter("require_rtk_fixed").value)
-        self.stop_if_no_rtk = bool(self.get_parameter("stop_if_no_rtk").value)
-
         self.invert_turn_direction = bool(
             self.get_parameter("invert_turn_direction").value
         )
@@ -113,21 +114,30 @@ class WaypointNavNode(Node):
 
         self.goal_reached = False
 
-        # Important: start by turning toward target before moving forward
+        # Start by turning toward the target before moving forward
         self.nav_mode = "TURN"
 
         self.last_command_time = 0.0
         self.last_log_time = 0.0
 
         self.cmd_pub = self.create_publisher(String, "/cmd_drive", 10)
+
         self.target_heading_pub = self.create_publisher(
-            Float32, "/navigation/target_heading_deg", 10
+            Float32,
+            "/navigation/target_heading_deg",
+            10,
         )
+
         self.distance_pub = self.create_publisher(
-            Float32, "/navigation/distance_to_target_m", 10
+            Float32,
+            "/navigation/distance_to_target_m",
+            10,
         )
+
         self.nav_status_pub = self.create_publisher(
-            String, "/navigation/status", 10
+            String,
+            "/navigation/status",
+            10,
         )
 
         self.gps_sub = self.create_subscription(
@@ -156,8 +166,11 @@ class WaypointNavNode(Node):
         self.get_logger().info("waypoint_nav_node started.")
         self.get_logger().info(
             f"Target GPS: lat={self.target_lat:.8f}, "
-            f"lon={self.target_lon:.8f}, "
-            f"goal_radius={self.goal_radius_m:.2f} m"
+            f"lon={self.target_lon:.8f}"
+        )
+        self.get_logger().info(
+            f"Goal radius: RTK_FIXED={self.fixed_goal_radius_m:.2f} m, "
+            f"non_fixed={self.non_fixed_goal_radius_m:.2f} m"
         )
         self.get_logger().info(
             f"Heading hysteresis: forward_threshold={self.heading_tolerance_deg:.2f} deg, "
@@ -218,17 +231,21 @@ class WaypointNavNode(Node):
 
         return self.turn_pwm_fast
 
+    def get_active_goal_radius_m(self) -> float:
+        """
+        RTK_FIXED varsa 30 cm hedef yarıçapı kullanılır.
+        RTK_FIXED yoksa ama GPS konumu varsa 60 cm hedef yarıçapı kullanılır.
+        """
+        if self.rtk_quality == "4":
+            return self.fixed_goal_radius_m
+
+        return self.non_fixed_goal_radius_m
+
     def stop(self, reason: str):
         self.nav_mode = "TURN"
         self.publish_cmd("MOTOR:STOP")
         self.publish_status(f"STOP,{reason}")
         self.log_throttled(f"STOP: {reason}")
-
-    def rtk_is_allowed(self) -> bool:
-        if not self.require_rtk_fixed:
-            return True
-
-        return self.rtk_quality == "4"
 
     def control_loop(self):
         now = time.time()
@@ -241,24 +258,24 @@ class WaypointNavNode(Node):
             self.stop("TARGET_NOT_SET")
             return
 
+        # GPS hiç gelmediyse dur
         if self.latest_lat is None or self.latest_lon is None:
             self.stop("NO_GPS")
             return
 
+        # GPS önceden gelmiş ama uzun süredir yenilenmemişse dur
         if now - self.latest_gps_time > self.gps_timeout_sec:
             self.stop("GPS_TIMEOUT")
             return
 
+        # Heading hiç gelmediyse dur
         if self.latest_heading is None:
             self.stop("NO_HEADING")
             return
 
+        # Heading önceden gelmiş ama uzun süredir yenilenmemişse dur
         if now - self.latest_heading_time > self.heading_timeout_sec:
             self.stop("HEADING_TIMEOUT")
-            return
-
-        if self.stop_if_no_rtk and not self.rtk_is_allowed():
-            self.stop(f"RTK_NOT_FIXED q={self.rtk_quality} fix={self.rtk_fix_name}")
             return
 
         distance_m = distance_between_gps_m(
@@ -272,9 +289,16 @@ class WaypointNavNode(Node):
         distance_msg.data = float(distance_m)
         self.distance_pub.publish(distance_msg)
 
-        if distance_m <= self.goal_radius_m:
+        active_goal_radius_m = self.get_active_goal_radius_m()
+
+        if distance_m <= active_goal_radius_m:
             self.goal_reached = True
-            self.stop(f"ARRIVED distance={distance_m:.3f}m")
+            self.stop(
+                f"ARRIVED distance={distance_m:.3f}m "
+                f"radius={active_goal_radius_m:.2f}m "
+                f"rtk_q={self.rtk_quality} "
+                f"rtk_fix={self.rtk_fix_name}"
+            )
             return
 
         target_heading = normalize_heading_deg(
@@ -341,6 +365,7 @@ class WaypointNavNode(Node):
             f"target_lat={self.target_lat:.8f},"
             f"target_lon={self.target_lon:.8f},"
             f"distance_m={distance_m:.3f},"
+            f"active_goal_radius_m={active_goal_radius_m:.2f},"
             f"heading={current_heading:.2f},"
             f"target_heading={target_heading:.2f},"
             f"error={error:.2f},"
