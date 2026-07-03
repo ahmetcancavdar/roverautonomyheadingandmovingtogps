@@ -36,13 +36,14 @@ The current system can:
 10. Stop when the rover enters the target radius.
 ```
 
-For precise autonomous waypoint tests, the system is designed to stop inside a:
+The waypoint navigation system always uses the best available GPS data. RTK_FIXED is not required for movement anymore.
 
 ```text
-0.30 m target radius
+RTK_FIXED available      -> stop radius = 0.30 m
+RTK_FIXED not available  -> stop radius = 0.60 m
+No GPS data              -> stop motors
+No heading data          -> stop motors
 ```
-
-when RTK_FIXED is available.
 
 ---
 
@@ -80,15 +81,26 @@ gps_turn_node heading_tolerance_deg = 2.75
 waypoint_nav_node heading_tolerance_deg = 5.0
 waypoint_nav_node reacquire_heading_error_deg = 10.0
 
-goal_radius_m = 0.30 for RTK_FIXED final test
-goal_radius_m = 2.0 for RTK_FLOAT / non-RTK movement test
+fixed_goal_radius_m = 0.30
+non_fixed_goal_radius_m = 0.60
+
+turn_pwm_slow = 45
+turn_pwm_fast = 75
+forward_pwm = 60
+slow_turn_threshold_deg = 30.0
+command_interval_sec = 0.25
 ```
 
-Important note:
+Important notes:
 
 ```text
 heading_turn_node and gps_turn_node keep 2.75 degrees for precise static turning.
+
 waypoint_nav_node uses 5.0 / 10.0 hysteresis because it drives while GPS and compass values are changing.
+
+RTK_FIXED is not required for movement.
+If GPS is valid but not RTK_FIXED, the rover continues with 0.60 m target radius.
+If RTK_FIXED is available, the rover uses 0.30 m target radius.
 ```
 
 ---
@@ -140,8 +152,10 @@ Raspberry Pi 5 / ROS2 Jazzy
         ├── Calculates target bearing continuously
         ├── Turns toward target when heading error is large
         ├── Moves forward when heading error is acceptable
-        ├── Uses hysteresis to reduce left-right oscillation
-        └── Stops inside the target radius
+        ├── Uses hysteresis to reduce oscillation
+        ├── Uses 0.30 m radius if RTK_FIXED is active
+        ├── Uses 0.60 m radius if RTK_FIXED is not active but GPS is valid
+        └── Stops if GPS or heading data is lost
 
 Arduino Mega
     │
@@ -220,7 +234,7 @@ Examples:
 ```text
 MOTOR:LEFT:80
 MOTOR:RIGHT:80
-MOTOR:FWD:50
+MOTOR:FWD:60
 MOTOR:STOP
 ```
 
@@ -263,13 +277,18 @@ q=5 -> RTK_FLOAT
 q=6 -> DEAD_RECKONING
 ```
 
-For the final 30 cm waypoint test, the expected status is:
+Waypoint behavior:
 
 ```text
-q=4, fix=RTK_FIXED
+q=4 RTK_FIXED                 -> move and stop inside 0.30 m
+q=5 RTK_FLOAT                 -> move and stop inside 0.60 m
+q=1 SPS                       -> move and stop inside 0.60 m
+No RTCM but valid GPS position -> move and stop inside 0.60 m
+No valid GPS position          -> stop motors
+GPS timeout                    -> stop motors
+No heading data                -> stop motors
+Heading timeout                -> stop motors
 ```
-
-RTK_FLOAT can be used for movement logic tests, but not for final 30 cm accuracy validation.
 
 ---
 
@@ -440,8 +459,6 @@ Wait until survey-in is completed and RTCM transmission starts:
 [BASE TX] ... byte/s | ... frame/s | msg: 1005:1, 1077:1, 1087:1, ...
 ```
 
-Do not start the final 30 cm autonomous waypoint test before RTCM transmission starts.
-
 If the base keeps printing:
 
 ```text
@@ -449,6 +466,8 @@ If the base keeps printing:
 ```
 
 then the base GPS is not producing RTCM yet, or the base GPS/radio ports are wrong.
+
+RTCM is useful for high accuracy. However, waypoint navigation no longer stops only because RTK_FIXED is missing. If rover GPS still provides a valid position, waypoint navigation continues with the non-fixed radius.
 
 ---
 
@@ -476,10 +495,12 @@ Check RTK status:
 ros2 topic echo /gps/rtk_status
 ```
 
-Expected for final precise test:
+Examples:
 
 ```text
 q=4,fix=RTK_FIXED
+q=5,fix=RTK_FLOAT
+q=1,fix=SPS
 ```
 
 Check RTCM status:
@@ -671,7 +692,7 @@ heading_tolerance_deg = 2.75
 
 ---
 
-## Waypoint Navigation Logic
+## Waypoint Navigation
 
 `waypoint_nav_node` performs live GPS-based movement.
 
@@ -692,18 +713,71 @@ The node continuously calculates:
 4. Bearing to target
 5. Heading error
 6. Required motor command
+7. Active goal radius
 ```
 
-The rover stops when:
+The rover does not stop only because RTK_FIXED is missing.
+
+RTK status only changes the target stop radius:
 
 ```text
-distance_to_target_m <= goal_radius_m
+RTK_FIXED / q=4        -> fixed_goal_radius_m = 0.30 m
+RTK_FLOAT / q=5        -> non_fixed_goal_radius_m = 0.60 m
+SPS / q=1              -> non_fixed_goal_radius_m = 0.60 m
+No RTCM but GPS valid  -> non_fixed_goal_radius_m = 0.60 m
+No GPS data            -> STOP
+GPS timeout            -> STOP
+No heading data        -> STOP
+Heading timeout        -> STOP
 ```
 
-For final RTK_FIXED testing:
+This means:
 
 ```text
-goal_radius_m = 0.30
+If RTK_FIXED is available:
+    The rover stops inside a 30 cm radius.
+
+If RTK_FIXED is not available but GPS position is valid:
+    The rover still moves and stops inside a 60 cm radius.
+
+If GPS position is not available:
+    The rover stops the motors.
+```
+
+Run waypoint navigation:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/arc26_ros2_ws/install/setup.bash
+
+ros2 run arc26_rover_bringup waypoint_nav_node \
+  --ros-args \
+  -p target_lat:=39.816056 \
+  -p target_lon:=30.528806 \
+  -p fixed_goal_radius_m:=0.30 \
+  -p non_fixed_goal_radius_m:=0.60 \
+  -p heading_tolerance_deg:=5.0 \
+  -p reacquire_heading_error_deg:=10.0 \
+  -p forward_pwm:=60 \
+  -p turn_pwm_slow:=45 \
+  -p turn_pwm_fast:=75 \
+  -p slow_turn_threshold_deg:=30.0 \
+  -p command_interval_sec:=0.25
+```
+
+Expected behavior:
+
+```text
+1. Rover reads live GPS position from /gps/fix.
+2. Rover reads compass heading from /compass/heading_deg.
+3. Rover calculates distance to the target GPS coordinate.
+4. Rover calculates bearing to the target.
+5. Rover turns toward the target if heading error is large.
+6. Rover moves forward if heading error is acceptable.
+7. Rover keeps refreshing GPS distance and target bearing while moving.
+8. If RTK_FIXED is active, it stops inside 0.30 m.
+9. If RTK_FIXED is not active but GPS is valid, it stops inside 0.60 m.
+10. If GPS or heading data is lost, it stops.
 ```
 
 ---
@@ -751,91 +825,6 @@ TURN -> FORWARD -> TURN -> FORWARD
 ```
 
 near the heading threshold.
-
----
-
-## Waypoint Navigation Test Without RTK_FIXED
-
-Use this only for low-precision movement logic tests.
-
-This mode allows RTK_FLOAT or normal GPS and uses a larger target radius.
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source ~/arc26_ros2_ws/install/setup.bash
-
-ros2 run arc26_rover_bringup waypoint_nav_node \
-  --ros-args \
-  -p target_lat:=39.816056 \
-  -p target_lon:=30.528806 \
-  -p goal_radius_m:=2.0 \
-  -p heading_tolerance_deg:=5.0 \
-  -p reacquire_heading_error_deg:=10.0 \
-  -p forward_pwm:=50 \
-  -p turn_pwm_slow:=45 \
-  -p turn_pwm_fast:=75 \
-  -p slow_turn_threshold_deg:=30.0 \
-  -p command_interval_sec:=0.25 \
-  -p require_rtk_fixed:=false \
-  -p stop_if_no_rtk:=false
-```
-
-Use this mode to test:
-
-```text
-GPS reading
-Heading reading
-Target bearing calculation
-Motor command generation
-Forward movement logic
-Heading correction behavior
-```
-
-Do not use this mode to validate 30 cm precision.
-
----
-
-## Final 30 cm RTK_FIXED Waypoint Navigation
-
-Use this only when `/gps/rtk_status` shows:
-
-```text
-q=4,fix=RTK_FIXED
-```
-
-Run:
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source ~/arc26_ros2_ws/install/setup.bash
-
-ros2 run arc26_rover_bringup waypoint_nav_node \
-  --ros-args \
-  -p target_lat:=39.816056 \
-  -p target_lon:=30.528806 \
-  -p goal_radius_m:=0.30 \
-  -p heading_tolerance_deg:=5.0 \
-  -p reacquire_heading_error_deg:=10.0 \
-  -p forward_pwm:=60 \
-  -p turn_pwm_slow:=45 \
-  -p turn_pwm_fast:=75 \
-  -p slow_turn_threshold_deg:=30.0 \
-  -p command_interval_sec:=0.25 \
-  -p require_rtk_fixed:=true \
-  -p stop_if_no_rtk:=true
-```
-
-Expected behavior:
-
-```text
-1. Rover reads its live RTK GPS position.
-2. Rover calculates distance to target.
-3. Rover calculates target bearing.
-4. Rover turns toward the target.
-5. Rover moves forward when heading is acceptable.
-6. Rover keeps refreshing bearing and distance while moving.
-7. Rover stops when it enters the 0.30 m target radius.
-```
 
 ---
 
@@ -989,7 +978,8 @@ RTCM radio-to-GPS forwarding
 Live waypoint navigation
 Distance-to-target calculation
 Heading hysteresis for stable movement
-RTK_FLOAT movement logic test
+Dynamic target radius based on RTK status
+RTK_FIXED and non-fixed GPS fallback behavior
 ```
 
 Current tuned values:
@@ -1000,8 +990,8 @@ Static heading turn tolerance: 2.75 degrees
 GPS direction turn tolerance: 2.75 degrees
 Waypoint forward threshold: 5.0 degrees
 Waypoint reacquire threshold: 10.0 degrees
-RTK_FIXED final goal radius: 0.30 m
-RTK_FLOAT test goal radius: 2.0 m
+RTK_FIXED goal radius: 0.30 m
+Non-fixed GPS goal radius: 0.60 m
 ```
 
 Next planned steps:
@@ -1025,21 +1015,18 @@ Next planned steps:
 1. Base computer:
    python3 tools/basertkgps_5dk_survey.py
 
-2. Wait for:
-   [BASE TX] ... frame/s
-
-3. Rover Raspberry Pi Terminal 1:
+2. Rover Raspberry Pi Terminal 1:
    gps_rtk_node
 
-4. Rover Raspberry Pi Terminal 2:
+3. Rover Raspberry Pi Terminal 2:
    arduino_bridge_node
 
-5. Rover Raspberry Pi Terminal 3:
+4. Rover Raspberry Pi Terminal 3:
    Check /gps/rtk_status and /compass/heading_deg
 
-6. Rover Raspberry Pi Terminal 4:
+5. Rover Raspberry Pi Terminal 4:
    Start waypoint_nav_node
 
-7. Rover Raspberry Pi Terminal 5:
+6. Rover Raspberry Pi Terminal 5:
    Monitor /navigation/status and /navigation/distance_to_target_m
 ```
